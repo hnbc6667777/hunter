@@ -253,20 +253,22 @@ bot.on('stoppedAttacking', () => {
 async function selectWeaponForTarget(entity) {
   const sword = bot.inventory.items().find(item => item.name.includes('sword'))
   if (sword) {
+    console.log(`🗡️ Found sword: ${sword.name}, equipping...`)
     await bot.equip(sword, 'hand')
     console.log(`🗡️ Equipped sword: ${sword.name}`)
     return
   }
   const axe = bot.inventory.items().find(item => item.name.includes('axe'))
   if (axe) {
+    console.log(`🪓 Found axe: ${axe.name}, equipping...`)
     await bot.equip(axe, 'hand')
     console.log(`🪓 Equipped axe: ${axe.name}`)
     return
   }
-  console.log('👊 No weapon, using fists.')
+  console.log('👊 No weapon found, using fists.')
 }
 
-bot.on('chat', (username, message) => {
+bot.on('chat', async (username, message) => {  // 改为 async
   if (username === bot.username) return
   console.log(`💬 Chat from ${username}: ${message}`)
 
@@ -283,6 +285,20 @@ bot.on('chat', (username, message) => {
       const dist = e.position.distanceTo(bot.entity.position)
       console.log(`  - ${e.name || e.type} (${e.type}) at ${e.position.floored()}, dist=${dist.toFixed(1)}`)
     })
+  } else if (message === 'attack') {
+    const target = bot.nearestEntity(e => e.type === 'mob' && e.name !== 'armor_stand')
+    if (target) {
+      try {
+        await selectWeaponForTarget(target)  // 先装备武器
+        bot.pvp.attack(target)
+        bot.chat(`Attacking ${target.name}`)
+      } catch (err) {
+        console.error('Attack preparation failed:', err)
+        bot.chat('Cannot attack.')
+      }
+    } else {
+      bot.chat('No mob nearby.')
+    }
   } else if (message === 'hunt') {
     bot.chat('Hunting mode activated!')
   } else if (message === 'stop') {
@@ -301,18 +317,7 @@ bot.on('chat', (username, message) => {
       bot.pathfinder.setGoal(goal)
       bot.chat('Coming!')
     }
-  } else if (message === 'attack') {
-  const target = bot.nearestEntity(e => e.type === 'mob' && e.name !== 'armor_stand')
-  if (target) {
-    bot.pvp.attack(target)
-  } else {
-    bot.chat('No mob nearby.')
   }
-}
-else if (message === 'inventory') {
-  console.log('Inventory:')
-  bot.inventory.items().forEach(item => console.log(`  - ${item.name} x${item.count}`))
-}
 })
 
 bot.on('error', err => console.error('❌ Bot error:', err))
