@@ -306,8 +306,10 @@ function isTarget(entity) {
   if (!entity) return false
   if (entity.type === 'player') return false          // 排除玩家
   if (entity.name === 'armor_stand') return false     // 排除盔甲架
-  // 包含所有可攻击的生物类型
-  const targetTypes = ['hostile', 'passive', 'mob', 'animal', 'water_creature']
+  if (entity.isInWater) return false                  // 排除水中生物
+  if (entity.position.y < 60) return false            // 排除地下深处（可根据世界调整）
+
+  const targetTypes = ['hostile', 'passive', 'mob', 'animal']
   return targetTypes.includes(entity.type)
 }
 
