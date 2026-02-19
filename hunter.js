@@ -86,7 +86,11 @@ async function takeSupplies() {
 
     const armorTypes = ['helmet', 'chestplate', 'leggings', 'boots']
 
-    // 收集需要取出的物品（避免在迭代中修改容器）
+    // 定义工具基础名称（不包含特定材质，如 pickaxe 匹配所有镐）
+    const toolBaseNames = ['pickaxe', 'shovel', 'hoe', 'shears', 'fishing_rod', 'flint_and_steel', 'carrot_on_a_stick', 'warped_fungus_on_a_stick', 'brush']
+    const shieldBaseNames = ['shield']
+
+    // 收集需要取出的物品
     const toWithdraw = []
 
     for (const item of container.containerItems()) {
@@ -99,28 +103,44 @@ async function takeSupplies() {
           if (take > 0) toWithdraw.push({ type: item.type, count: take, nbt: item.nbt })
         }
       }
-      // 武器：如果背包中没有武器则取1件
+      // 武器：如果背包中没有武器则取1件（已有武器则跳过）
       else if (weaponNames.includes(item.name)) {
         const hasWeapon = bot.inventory.items().some(i => weaponNames.includes(i.name))
         if (!hasWeapon) {
           toWithdraw.push({ type: item.type, count: 1, nbt: item.nbt })
         }
       }
-      // 装备：每种类型取1件（无论当前是否有，后续由armorManager决定最佳搭配）
+      // 装备：每种类型取1件（后续由armorManager自动穿上）
       else if (armorTypes.some(type => item.name.includes(type))) {
         toWithdraw.push({ type: item.type, count: 1, nbt: item.nbt })
+      }
+      // 工具：如果背包中缺少该类型工具，则取1件
+      else if (toolBaseNames.some(base => item.name.includes(base))) {
+        const baseType = toolBaseNames.find(base => item.name.includes(base))
+        const hasThisTool = bot.inventory.items().some(i => i.name.includes(baseType))
+        if (!hasThisTool) {
+          toWithdraw.push({ type: item.type, count: 1, nbt: item.nbt })
+        }
+      }
+      // 盾牌：如果背包中没有盾牌，则取1件
+      else if (shieldBaseNames.some(base => item.name.includes(base))) {
+        const hasShield = bot.inventory.items().some(i => shieldBaseNames.some(sn => i.name.includes(sn)))
+        if (!hasShield) {
+          toWithdraw.push({ type: item.type, count: 1, nbt: item.nbt })
+        }
       }
     }
 
     // 执行取出
     for (const req of toWithdraw) {
       await container.withdraw(req.type, null, req.count, req.nbt)
-      console.log(`Took ${req.count} x ${bot.registry.items[req.type].name}`)
+      const itemName = bot.registry.items[req.type]?.name || 'unknown'
+      console.log(`Took ${req.count} x ${itemName}`)
     }
 
     container.close()
 
-    // 让 armorManager 自动穿上最佳装备
+    // 自动穿上最佳装备
     bot.armorManager.equipAll()
     bot.chat('Supplies taken and best armor equipped.')
   } catch (err) {
