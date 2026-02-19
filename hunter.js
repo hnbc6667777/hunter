@@ -1,8 +1,311 @@
-[?1001s[?1000h[?1000l[?1001r[?1049h[=1;1u[?1h[?2004h[1;34r[27m[24m[23m[0m[H[2J[?25l[34;1H"~/mnt/ghcup/.git/COMMIT_EDITMSG"<ghcup/.git/COMMIT_EDITMSG" 8 行, 203 字节[2;1H[34m# 请为您的变更输入提交说明。以 '#' 开始的行将被忽略，而一个空的提交
-# 说明将会终止提交。
-#
-# 位于分支 main
-# [0m[35m要提交的变更：[0m
-[34m#       [0m[32m修改[0m[34m：[0m[31m     hunter.js[0m
-[34m#[0m
-[94m~                                                                      [10;1H~                                                                      [11;1H~                                                                      [12;1H~                                                                      [13;1H~                                                                      [14;1H~                                                                      [15;1H~                                                                      [16;1H~                                                                      [17;1H~                                                                      [18;1H~                                                                      [19;1H~                                                                      [20;1H~                                                                      [21;1H~                                                                      [22;1H~                                                                      [23;1H~                                                                      [24;1H~                                                                      [25;1H~                                                                      [26;1H~                                                                      [27;1H~                                                                      [28;1H~                                                                      [29;1H~                                                                      [30;1H~                                                                      [31;1H~                                                                      [32;1H~                                                                      [33;1H~                                                                      [0m[34;54H1,0-1[8C全部[1;1H[?12h[?25h[?u[34;1H[?2004l[>4;m[=0;1u[34;1H[K[34;1H[?2004l[?1l[?1049l[>4;m[=0;1u
+const mineflayer = require('mineflayer')
+const { pathfinder, Movements, goals } = require('mineflayer-pathfinder')
+const pvp = require('mineflayer-pvp').plugin
+const toolPlugin = require('mineflayer-tool').plugin
+const autoEat = require('mineflayer-auto-eat').loader
+const armorManager = require('mineflayer-armor-manager')
+const mcDataLoader = require('minecraft-data')
+
+if (process.argv.length < 4 || process.argv.length > 6) {
+  console.log('Usage: node hunter.js <host> <port> [<name>] [<password>]')
+  process.exit(1)
+}
+
+const bot = mineflayer.createBot({
+  host: process.argv[2],
+  port: parseInt(process.argv[3]),
+  username: process.argv[4] || 'Hunter',
+  password: process.argv[5]
+})
+
+bot.loadPlugin(pathfinder)
+bot.loadPlugin(pvp)
+bot.loadPlugin(toolPlugin)
+bot.loadPlugin(autoEat)
+bot.loadPlugin(armorManager)
+
+bot.isBusy = false
+let depositInterval = null
+
+function findNearestChest(mcData) {
+  const chestIds = [
+    mcData.blocksByName.chest?.id,
+    mcData.blocksByName.trapped_chest?.id,
+    mcData.blocksByName.barrel?.id
+  ].filter(id => id !== undefined)
+
+  if (chestIds.length === 0) {
+    console.log('No chest types found in this version.')
+    return null
+  }
+
+  const blocks = bot.findBlocks({
+    matching: block => chestIds.includes(block.type),
+    maxDistance: 32,
+    count: 1
+  })
+
+  if (blocks.length === 0) return null
+  return bot.blockAt(blocks[0])
+}
+
+async function goToChest(chestBlock) {
+  const goal = new goals.GoalNear(chestBlock.position.x, chestBlock.position.y, chestBlock.position.z, 2)
+  await bot.pathfinder.goto(goal)
+}
+
+async function takeSupplies() {
+  if (bot.isBusy || bot.pvp.target) {
+    bot.chat('I am busy right now.')
+    return
+  }
+  bot.isBusy = true
+  bot.pvp.stop()
+  bot.pathfinder.setGoal(null)
+
+  try {
+    const mcData = mcDataLoader(bot.version)
+    const chest = findNearestChest(mcData)
+    if (!chest) {
+      bot.chat('No chest found nearby.')
+      return
+    }
+
+    bot.chat('Moving to chest to take supplies...')
+    await goToChest(chest)
+
+    const container = await bot.openContainer(chest)
+    bot.chat('Chest opened. Taking supplies...')
+
+    const foodItems = bot.autoEat.foodsArray || []
+    const foodNames = foodItems.map(f => f.name)
+
+    const weaponNames = Object.values(mcData.items)
+      .filter(item => item.name.includes('sword') || item.name.includes('axe') || item.name.includes('bow') || item.name.includes('crossbow'))
+      .map(item => item.name)
+
+    const armorTypes = ['helmet', 'chestplate', 'leggings', 'boots']
+
+    // 收集需要取出的物品（避免在迭代中修改容器）
+    const toWithdraw = []
+
+    for (const item of container.containerItems()) {
+      // 食物：少于16个则补充到16个
+      if (foodNames.includes(item.name)) {
+        const currentCount = bot.inventory.count(item.type, null)
+        if (currentCount < 16) {
+          const need = 16 - currentCount
+          const take = Math.min(need, item.count)
+          if (take > 0) toWithdraw.push({ type: item.type, count: take, nbt: item.nbt })
+        }
+      }
+      // 武器：如果背包中没有武器则取1件
+      else if (weaponNames.includes(item.name)) {
+        const hasWeapon = bot.inventory.items().some(i => weaponNames.includes(i.name))
+        if (!hasWeapon) {
+          toWithdraw.push({ type: item.type, count: 1, nbt: item.nbt })
+        }
+      }
+      // 装备：每种类型取1件（无论当前是否有，后续由armorManager决定最佳搭配）
+      else if (armorTypes.some(type => item.name.includes(type))) {
+        toWithdraw.push({ type: item.type, count: 1, nbt: item.nbt })
+      }
+    }
+
+    // 执行取出
+    for (const req of toWithdraw) {
+      await container.withdraw(req.type, null, req.count, req.nbt)
+      console.log(`Took ${req.count} x ${bot.registry.items[req.type].name}`)
+    }
+
+    container.close()
+
+    // 让 armorManager 自动穿上最佳装备
+    bot.armorManager.equipAll()
+    bot.chat('Supplies taken and best armor equipped.')
+  } catch (err) {
+    console.error('Error during restock:', err)
+    bot.chat('Failed to restock.')
+  } finally {
+    bot.isBusy = false
+  }
+}
+
+async function depositLoot() {
+  if (bot.isBusy || bot.pvp.target) {
+    console.log('Cannot deposit: bot is busy or fighting.')
+    return
+  }
+  bot.isBusy = true
+  bot.pvp.stop()
+  bot.pathfinder.setGoal(null)
+
+  try {
+    const mcData = mcDataLoader(bot.version)
+    const chest = findNearestChest(mcData)
+    if (!chest) {
+      bot.chat('No chest found nearby.')
+      return
+    }
+
+    bot.chat('Moving to chest to deposit loot...')
+    await goToChest(chest)
+
+    const container = await bot.openContainer(chest)
+    bot.chat('Chest opened. Depositing loot...')
+
+    const inventoryStart = container.inventorySlotStart
+    const inventoryEnd = container.inventorySlotEnd
+    const hotbarStart = inventoryStart
+    const hotbarEnd = inventoryStart + 8
+    const armorStart = inventoryStart + 5
+    const armorEnd = inventoryStart + 8
+
+    for (let slot = inventoryStart; slot <= inventoryEnd; slot++) {
+      if (slot >= hotbarStart && slot <= hotbarEnd) continue
+      if (slot >= armorStart && slot <= armorEnd) continue
+
+      const item = bot.inventory.slots[slot]
+      if (item) {
+        await container.deposit(item.type, null, item.count, item.nbt)
+        console.log(`Deposited ${item.count} x ${item.name}`)
+      }
+    }
+
+    container.close()
+    bot.chat('Loot deposited.')
+  } catch (err) {
+    console.error('Error during deposit:', err)
+    bot.chat('Failed to deposit loot.')
+  } finally {
+    bot.isBusy = false
+  }
+}
+
+function startAutoDeposit() {
+  if (depositInterval) clearInterval(depositInterval)
+  depositInterval = setInterval(() => {
+    if (bot.pvp.target) {
+      console.log('⏭️ Auto deposit skipped: bot is fighting.')
+      return
+    }
+    depositLoot()
+  }, 500 * 1000)
+}
+
+bot.once('spawn', () => {
+  console.log('✅ Bot spawned!')
+
+  const mcData = mcDataLoader(bot.version)
+  console.log(`📦 Minecraft version: ${bot.version}`)
+
+  const movements = new Movements(bot, mcData)
+  movements.allowParkour = true
+  movements.canDig = false
+  bot.pathfinder.setMovements(movements)
+  console.log('🔧 Pathfinder movements configured.')
+
+  bot.armorManager.equipAll()
+  console.log('🛡️ Armor equipped.')
+
+  bot.autoEat.enableAuto()
+  bot.autoEat.setOpts({
+    priority: 'foodPoints',
+    minHunger: 14,
+    bannedFood: ['rotten_flesh', 'pufferfish', 'chorus_fruit', 'poisonous_potato', 'spider_eye']
+  })
+  console.log('🍖 Auto-eat enabled.')
+
+  startAutoDeposit()
+  console.log('⏰ Auto deposit every 500s started.')
+
+  setTimeout(() => {
+    const entities = Object.values(bot.entities)
+    console.log(`🌍 Nearby entities (${entities.length}):`)
+    entities.forEach(e => {
+      console.log(`  - ${e.name || e.type} (${e.type}) at ${e.position.floored()}`)
+    })
+  }, 2000)
+})
+
+bot.on('physicsTick', async () => {
+  if (bot.pvp.target || bot.isBusy) return
+
+  const filter = e => 
+    e.type === 'mob' && 
+    e.name !== 'armor_stand' && 
+    e.position.distanceTo(bot.entity.position) < 32
+
+  const target = bot.nearestEntity(filter)
+
+  if (target) {
+    console.log(`🎯 Found target: ${target.name || target.displayName} at ${target.position.floored()}`)
+    await selectWeaponForTarget(target)
+    console.log(`⚔️ Attacking ${target.name || target.displayName}`)
+    bot.pvp.attack(target)
+  }
+})
+
+bot.on('stoppedAttacking', () => {
+  console.log('🛑 Stopped attacking')
+})
+
+async function selectWeaponForTarget(entity) {
+  const sword = bot.inventory.items().find(item => item.name.includes('sword'))
+  if (sword) {
+    await bot.equip(sword, 'hand')
+    console.log(`🗡️ Equipped sword: ${sword.name}`)
+    return
+  }
+  const axe = bot.inventory.items().find(item => item.name.includes('axe'))
+  if (axe) {
+    await bot.equip(axe, 'hand')
+    console.log(`🪓 Equipped axe: ${axe.name}`)
+    return
+  }
+  console.log('👊 No weapon, using fists.')
+}
+
+bot.on('chat', (username, message) => {
+  if (username === bot.username) return
+  console.log(`💬 Chat from ${username}: ${message}`)
+
+  if (message === 'restock') {
+    bot.chat('Restocking supplies...')
+    takeSupplies()
+  } else if (message === 'deposit') {
+    bot.chat('Depositing loot...')
+    depositLoot()
+  } else if (message === 'scan') {
+    const entities = Object.values(bot.entities)
+    console.log(`Nearby entities (${entities.length}):`)
+    entities.forEach(e => {
+      const dist = e.position.distanceTo(bot.entity.position)
+      console.log(`  - ${e.name || e.type} (${e.type}) at ${e.position.floored()}, dist=${dist.toFixed(1)}`)
+    })
+  } else if (message === 'hunt') {
+    bot.chat('Hunting mode activated!')
+  } else if (message === 'stop') {
+    bot.pvp.stop()
+    bot.pathfinder.setGoal(null)
+    bot.chat('Stopped hunting.')
+  } else if (message === 'come') {
+    const player = bot.players[username]
+    if (player && player.entity) {
+      const goal = new goals.GoalNear(
+        player.entity.position.x,
+        player.entity.position.y,
+        player.entity.position.z,
+        2
+      )
+      bot.pathfinder.setGoal(goal)
+      bot.chat('Coming!')
+    }
+  }
+})
+
+bot.on('error', err => console.error('❌ Bot error:', err))
+bot.on('end', reason => {
+  console.log('🔌 Bot disconnected:', reason)
+  if (depositInterval) clearInterval(depositInterval)
+})
