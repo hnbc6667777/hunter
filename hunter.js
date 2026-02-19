@@ -301,7 +301,18 @@ bot.on('chat', (username, message) => {
       bot.pathfinder.setGoal(goal)
       bot.chat('Coming!')
     }
+  } else if (message === 'attack') {
+  const target = bot.nearestEntity(e => e.type === 'mob' && e.name !== 'armor_stand')
+  if (target) {
+    bot.pvp.attack(target)
+  } else {
+    bot.chat('No mob nearby.')
   }
+}
+else if (message === 'inventory') {
+  console.log('Inventory:')
+  bot.inventory.items().forEach(item => console.log(`  - ${item.name} x${item.count}`))
+}
 })
 
 bot.on('error', err => console.error('❌ Bot error:', err))
