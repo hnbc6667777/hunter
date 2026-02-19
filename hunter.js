@@ -228,20 +228,17 @@ bot.once('spawn', () => {
   }, 2000)
 })
 
+// 自动攻击逻辑
 bot.on('physicsTick', async () => {
   if (bot.pvp.target || bot.isBusy) return
 
-  const filter = e => 
-    e.type === 'mob' && 
-    e.name !== 'armor_stand' && 
-    e.position.distanceTo(bot.entity.position) < 32
-
-  const target = bot.nearestEntity(filter)
+  const target = bot.nearestEntity(e => 
+    isTarget(e) && e.position.distanceTo(bot.entity.position) < 32
+  )
 
   if (target) {
-    console.log(`🎯 Found target: ${target.name || target.displayName} at ${target.position.floored()}`)
+    console.log(`🎯 Auto target: ${target.name || target.type} at distance ${target.position.distanceTo(bot.entity.position).toFixed(1)}`)
     await selectWeaponForTarget(target)
-    console.log(`⚔️ Attacking ${target.name || target.displayName}`)
     bot.pvp.attack(target)
   }
 })
@@ -268,6 +265,16 @@ async function selectWeaponForTarget(entity) {
   console.log('👊 No weapon found, using fists.')
 }
 
+// 统一的目标判断函数
+function isTarget(entity) {
+  if (!entity) return false
+  if (entity.type === 'player') return false          // 排除玩家
+  if (entity.name === 'armor_stand') return false     // 排除盔甲架
+  // 包含所有可攻击的生物类型
+  const targetTypes = ['hostile', 'passive', 'mob', 'animal', 'water_creature']
+  return targetTypes.includes(entity.type)
+}
+
 bot.on('chat', async (username, message) => {  // 改为 async
   if (username === bot.username) return
   console.log(`💬 Chat from ${username}: ${message}`)
@@ -285,19 +292,21 @@ bot.on('chat', async (username, message) => {  // 改为 async
       const dist = e.position.distanceTo(bot.entity.position)
       console.log(`  - ${e.name || e.type} (${e.type}) at ${e.position.floored()}, dist=${dist.toFixed(1)}`)
     })
-  } else if (message === 'attack') {
-    const target = bot.nearestEntity(e => e.type === 'mob' && e.name !== 'armor_stand')
+  }   else if (message === 'attack') {
+    const target = bot.nearestEntity(e => isTarget(e))
     if (target) {
+      const dist = target.position.distanceTo(bot.entity.position).toFixed(1)
+      console.log(`⚔️ Manual attack targeting: ${target.name || target.type} at distance ${dist}`)
       try {
-        await selectWeaponForTarget(target)  // 先装备武器
+        await selectWeaponForTarget(target)
         bot.pvp.attack(target)
-        bot.chat(`Attacking ${target.name}`)
+        bot.chat(`Attacking ${target.name || target.type}`)
       } catch (err) {
         console.error('Attack preparation failed:', err)
         bot.chat('Cannot attack.')
       }
     } else {
-      bot.chat('No mob nearby.')
+      bot.chat('No target nearby.')
     }
   } else if (message === 'hunt') {
     bot.chat('Hunting mode activated!')
