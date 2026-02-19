@@ -268,20 +268,36 @@ bot.on('stoppedAttacking', () => {
 })
 
 async function selectWeaponForTarget(entity) {
-  const sword = bot.inventory.items().find(item => item.name.includes('sword'))
+  // 调试：列出背包所有物品（便于检查）
+  console.log('🔍 Current inventory:')
+  bot.inventory.items().forEach(item => console.log(`   - ${item.name}`))
+
+  // 优先选择剑（名称以 "_sword" 结尾）
+  const sword = bot.inventory.items().find(item => item.name.endsWith('_sword'))
   if (sword) {
     console.log(`🗡️ Found sword: ${sword.name}, equipping...`)
     await bot.equip(sword, 'hand')
     console.log(`🗡️ Equipped sword: ${sword.name}`)
     return
   }
-  const axe = bot.inventory.items().find(item => item.name.includes('axe'))
+
+  // 其次选择斧（名称以 "_axe" 结尾，确保不匹配 pickaxe）
+  const axe = bot.inventory.items().find(item => item.name.endsWith('_axe'))
   if (axe) {
     console.log(`🪓 Found axe: ${axe.name}, equipping...`)
     await bot.equip(axe, 'hand')
     console.log(`🪓 Equipped axe: ${axe.name}`)
     return
   }
+
+  // 如果没有剑/斧，才考虑镐（作为最后手段）
+  const pickaxe = bot.inventory.items().find(item => item.name.endsWith('_pickaxe'))
+  if (pickaxe) {
+    console.log(`⛏️ No sword/axe, using pickaxe: ${pickaxe.name}`)
+    await bot.equip(pickaxe, 'hand')
+    return
+  }
+
   console.log('👊 No weapon found, using fists.')
 }
 
