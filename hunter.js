@@ -26,7 +26,9 @@ bot.loadPlugin(armorManager)
 
 bot.isBusy = false
 let depositInterval = null
+let guardPos = null // 值守位置
 
+// ------------------ 辅助函数 ------------------
 function findNearestChest(mcData) {
   const chestIds = [
     mcData.blocksByName.chest?.id,
@@ -54,6 +56,45 @@ async function goToChest(chestBlock) {
   await bot.pathfinder.goto(goal)
 }
 
+// 目标判断：排除玩家、盔甲架、水中生物，并可选深度过滤
+function isTarget(entity) {
+  if (!entity) return false
+  if (entity.type === 'player') return false
+  if (entity.name === 'armor_stand') return false
+  if (entity.isInWater) return false
+  // 可根据世界调整地表高度，此处设为 >60（地面层）
+  if (entity.position.y < 60) return false
+
+  const targetTypes = ['hostile', 'passive', 'mob', 'animal']
+  return targetTypes.includes(entity.type)
+}
+
+// 武器选择（优先剑，其次斧，最后镐）
+async function selectWeaponForTarget(entity) {
+  const sword = bot.inventory.items().find(item => item.name.endsWith('_sword'))
+  if (sword) {
+    console.log(`🗡️ Found sword: ${sword.name}, equipping...`)
+    await bot.equip(sword, 'hand')
+    console.log(`🗡️ Equipped sword: ${sword.name}`)
+    return
+  }
+  const axe = bot.inventory.items().find(item => item.name.endsWith('_axe'))
+  if (axe) {
+    console.log(`🪓 Found axe: ${axe.name}, equipping...`)
+    await bot.equip(axe, 'hand')
+    console.log(`🪓 Equipped axe: ${axe.name}`)
+    return
+  }
+  const pickaxe = bot.inventory.items().find(item => item.name.endsWith('_pickaxe'))
+  if (pickaxe) {
+    console.log(`⛏️ No sword/axe, using pickaxe: ${pickaxe.name}`)
+    await bot.equip(pickaxe, 'hand')
+    return
+  }
+  console.log('👊 No weapon found, using fists.')
+}
+
+// ------------------ 补给功能 ------------------
 async function takeSupplies() {
   if (bot.isBusy || bot.pvp.target) {
     bot.chat('I am busy right now.')
@@ -85,16 +126,12 @@ async function takeSupplies() {
       .map(item => item.name)
 
     const armorTypes = ['helmet', 'chestplate', 'leggings', 'boots']
-
-    // 定义工具基础名称（不包含特定材质，如 pickaxe 匹配所有镐）
     const toolBaseNames = ['pickaxe', 'shovel', 'hoe', 'shears', 'fishing_rod', 'flint_and_steel', 'carrot_on_a_stick', 'warped_fungus_on_a_stick', 'brush']
     const shieldBaseNames = ['shield']
 
-    // 收集需要取出的物品
     const toWithdraw = []
 
     for (const item of container.containerItems()) {
-      // 食物：少于16个则补充到16个
       if (foodNames.includes(item.name)) {
         const currentCount = bot.inventory.count(item.type, null)
         if (currentCount < 16) {
@@ -102,28 +139,20 @@ async function takeSupplies() {
           const take = Math.min(need, item.count)
           if (take > 0) toWithdraw.push({ type: item.type, count: take, nbt: item.nbt })
         }
-      }
-      // 武器：如果背包中没有武器则取1件（已有武器则跳过）
-      else if (weaponNames.includes(item.name)) {
+      } else if (weaponNames.includes(item.name)) {
         const hasWeapon = bot.inventory.items().some(i => weaponNames.includes(i.name))
         if (!hasWeapon) {
           toWithdraw.push({ type: item.type, count: 1, nbt: item.nbt })
         }
-      }
-      // 装备：每种类型取1件（后续由armorManager自动穿上）
-      else if (armorTypes.some(type => item.name.includes(type))) {
+      } else if (armorTypes.some(type => item.name.includes(type))) {
         toWithdraw.push({ type: item.type, count: 1, nbt: item.nbt })
-      }
-      // 工具：如果背包中缺少该类型工具，则取1件
-      else if (toolBaseNames.some(base => item.name.includes(base))) {
+      } else if (toolBaseNames.some(base => item.name.includes(base))) {
         const baseType = toolBaseNames.find(base => item.name.includes(base))
         const hasThisTool = bot.inventory.items().some(i => i.name.includes(baseType))
         if (!hasThisTool) {
           toWithdraw.push({ type: item.type, count: 1, nbt: item.nbt })
         }
-      }
-      // 盾牌：如果背包中没有盾牌，则取1件
-      else if (shieldBaseNames.some(base => item.name.includes(base))) {
+      } else if (shieldBaseNames.some(base => item.name.includes(base))) {
         const hasShield = bot.inventory.items().some(i => shieldBaseNames.some(sn => i.name.includes(sn)))
         if (!hasShield) {
           toWithdraw.push({ type: item.type, count: 1, nbt: item.nbt })
@@ -131,7 +160,6 @@ async function takeSupplies() {
       }
     }
 
-    // 执行取出
     for (const req of toWithdraw) {
       await container.withdraw(req.type, null, req.count, req.nbt)
       const itemName = bot.registry.items[req.type]?.name || 'unknown'
@@ -139,8 +167,6 @@ async function takeSupplies() {
     }
 
     container.close()
-
-    // 自动穿上最佳装备
     bot.armorManager.equipAll()
     bot.chat('Supplies taken and best armor equipped.')
   } catch (err) {
@@ -213,6 +239,29 @@ function startAutoDeposit() {
   }, 500 * 1000)
 }
 
+// ------------------ 值守相关函数 ------------------
+function startGuarding(pos) {
+  guardPos = pos.clone()
+  bot.chat(`I will guard this area (${pos.x.toFixed(1)}, ${pos.y.toFixed(1)}, ${pos.z.toFixed(1)}).`)
+  // 立即移动到值守点
+  moveToGuardPos()
+}
+
+function stopGuarding() {
+  if (guardPos) {
+    guardPos = null
+    bot.chat('Stopped guarding.')
+  }
+}
+
+async function moveToGuardPos() {
+  if (!guardPos) return
+  const goal = new goals.GoalNear(guardPos.x, guardPos.y, guardPos.z, 2)
+  await bot.pathfinder.goto(goal)
+  console.log('✅ Returned to guard position.')
+}
+
+// ------------------ 事件监听 ------------------
 bot.once('spawn', () => {
   console.log('✅ Bot spawned!')
 
@@ -248,14 +297,39 @@ bot.once('spawn', () => {
   }, 2000)
 })
 
-// 自动攻击逻辑
+// 自动攻击/值守逻辑
 bot.on('physicsTick', async () => {
   if (bot.pvp.target || bot.isBusy) return
 
-  const target = bot.nearestEntity(e => 
+  // 值守模式
+  if (guardPos) {
+    // 只在距值守点 16 格内寻找目标
+    const target = bot.nearestEntity(e =>
+      isTarget(e) &&
+      e.position.distanceTo(guardPos) < 16 &&
+      e.position.distanceTo(bot.entity.position) < 32 // 同时考虑视野范围
+    )
+
+    if (target) {
+      console.log(`🎯 Guard target: ${target.name || target.type} at distance ${target.position.distanceTo(bot.entity.position).toFixed(1)}`)
+      await selectWeaponForTarget(target)
+      bot.pvp.attack(target)
+      return
+    }
+
+    // 没有目标且离值守点较远时，返回值守点
+    const distToGuard = bot.entity.position.distanceTo(guardPos)
+    if (distToGuard > 4) {
+      console.log(`⏪ Returning to guard point (${distToGuard.toFixed(1)} blocks away)`)
+      moveToGuardPos().catch(err => console.error('Move to guard failed:', err))
+    }
+    return
+  }
+
+  // 自由狩猎模式（原有逻辑）
+  const target = bot.nearestEntity(e =>
     isTarget(e) && e.position.distanceTo(bot.entity.position) < 32
   )
-
   if (target) {
     console.log(`🎯 Auto target: ${target.name || target.type} at distance ${target.position.distanceTo(bot.entity.position).toFixed(1)}`)
     await selectWeaponForTarget(target)
@@ -265,55 +339,14 @@ bot.on('physicsTick', async () => {
 
 bot.on('stoppedAttacking', () => {
   console.log('🛑 Stopped attacking')
+  // 如果是值守模式且不在值守点附近，则返回
+  if (guardPos && bot.entity.position.distanceTo(guardPos) > 4) {
+    moveToGuardPos().catch(err => console.error('Return to guard failed:', err))
+  }
 })
 
-async function selectWeaponForTarget(entity) {
-  // 调试：列出背包所有物品（便于检查）
-  console.log('🔍 Current inventory:')
-  bot.inventory.items().forEach(item => console.log(`   - ${item.name}`))
-
-  // 优先选择剑（名称以 "_sword" 结尾）
-  const sword = bot.inventory.items().find(item => item.name.endsWith('_sword'))
-  if (sword) {
-    console.log(`🗡️ Found sword: ${sword.name}, equipping...`)
-    await bot.equip(sword, 'hand')
-    console.log(`🗡️ Equipped sword: ${sword.name}`)
-    return
-  }
-
-  // 其次选择斧（名称以 "_axe" 结尾，确保不匹配 pickaxe）
-  const axe = bot.inventory.items().find(item => item.name.endsWith('_axe'))
-  if (axe) {
-    console.log(`🪓 Found axe: ${axe.name}, equipping...`)
-    await bot.equip(axe, 'hand')
-    console.log(`🪓 Equipped axe: ${axe.name}`)
-    return
-  }
-
-  // 如果没有剑/斧，才考虑镐（作为最后手段）
-  const pickaxe = bot.inventory.items().find(item => item.name.endsWith('_pickaxe'))
-  if (pickaxe) {
-    console.log(`⛏️ No sword/axe, using pickaxe: ${pickaxe.name}`)
-    await bot.equip(pickaxe, 'hand')
-    return
-  }
-
-  console.log('👊 No weapon found, using fists.')
-}
-
-// 统一的目标判断函数
-function isTarget(entity) {
-  if (!entity) return false
-  if (entity.type === 'player') return false          // 排除玩家
-  if (entity.name === 'armor_stand') return false     // 排除盔甲架
-  if (entity.isInWater) return false                  // 排除水中生物
-  if (entity.position.y < 60) return false            // 排除地下深处（可根据世界调整）
-
-  const targetTypes = ['hostile', 'passive', 'mob', 'animal']
-  return targetTypes.includes(entity.type)
-}
-
-bot.on('chat', async (username, message) => {  // 改为 async
+// ------------------ 聊天命令 ------------------
+bot.on('chat', async (username, message) => {
   if (username === bot.username) return
   console.log(`💬 Chat from ${username}: ${message}`)
 
@@ -330,7 +363,20 @@ bot.on('chat', async (username, message) => {  // 改为 async
       const dist = e.position.distanceTo(bot.entity.position)
       console.log(`  - ${e.name || e.type} (${e.type}) at ${e.position.floored()}, dist=${dist.toFixed(1)}`)
     })
-  }   else if (message === 'attack') {
+  } else if (message === 'guard') {
+    const player = bot.players[username]
+    if (!player || !player.entity) {
+      bot.chat("I can't see you.")
+      return
+    }
+    startGuarding(player.entity.position)
+  } else if (message === 'stop') {
+    // 停止所有活动：攻击、寻路、值守
+    bot.pvp.stop()
+    bot.pathfinder.setGoal(null)
+    stopGuarding()
+    bot.chat('Stopped all activities.')
+  } else if (message === 'attack') {
     const target = bot.nearestEntity(e => isTarget(e))
     if (target) {
       const dist = target.position.distanceTo(bot.entity.position).toFixed(1)
@@ -347,23 +393,9 @@ bot.on('chat', async (username, message) => {  // 改为 async
       bot.chat('No target nearby.')
     }
   } else if (message === 'hunt') {
-    bot.chat('Hunting mode activated!')
-  } else if (message === 'stop') {
-    bot.pvp.stop()
-    bot.pathfinder.setGoal(null)
-    bot.chat('Stopped hunting.')
-  } else if (message === 'come') {
-    const player = bot.players[username]
-    if (player && player.entity) {
-      const goal = new goals.GoalNear(
-        player.entity.position.x,
-        player.entity.position.y,
-        player.entity.position.z,
-        2
-      )
-      bot.pathfinder.setGoal(goal)
-      bot.chat('Coming!')
-    }
+    // 切换到自由狩猎模式（清除值守点）
+    stopGuarding()
+    bot.chat('Hunting mode activated.')
   }
 })
 
