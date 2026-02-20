@@ -5,6 +5,10 @@ const toolPlugin = require('mineflayer-tool').plugin
 const autoEat = require('mineflayer-auto-eat').loader
 const armorManager = require('mineflayer-armor-manager')
 const mcDataLoader = require('minecraft-data')
+const fs = require('fs').promises
+const path = require('path')
+
+const STATE_FILE = path.join(__dirname, 'guard_state.json')
 
 if (process.argv.length < 4 || process.argv.length > 6) {
   console.log('Usage: node hunter.js <host> <port> [<name>] [<password>]')
@@ -27,7 +31,35 @@ bot.loadPlugin(armorManager)
 bot.isBusy = false
 let depositInterval = null
 let guardPos = null
-let isMovingToGuard = false // 防止重复移动
+let isMovingToGuard = false
+
+// ------------------ 状态持久化 ------------------
+async function saveGuardState() {
+  try {
+    if (guardPos) {
+      await fs.writeFile(STATE_FILE, JSON.stringify({ 
+        x: guardPos.x, 
+        y: guardPos.y, 
+        z: guardPos.z 
+      }))
+    } else {
+      await fs.unlink(STATE_FILE).catch(() => {})
+    }
+  } catch (err) {
+    console.error('Failed to save guard state:', err)
+  }
+}
+
+async function loadGuardState() {
+  try {
+    const data = await fs.readFile(STATE_FILE, 'utf8')
+    const { x, y, z } = JSON.parse(data)
+    return new (require('vec3'))(x, y, z)
+  } catch (err) {
+    if (err.code !== 'ENOENT') console.error('Failed to load guard state:', err)
+    return null
+  }
+}
 
 // ------------------ 辅助函数 ------------------
 function findNearestChest(mcData) {
@@ -95,7 +127,7 @@ async function selectWeaponForTarget(entity) {
 // ------------------ 补给功能 ------------------
 async function takeSupplies() {
   if (bot.isBusy || bot.pvp.target) {
-    bot.chat('I am busy right now.')
+    console.log('⏭️ Restock skipped: bot is busy or fighting.')
     return
   }
   bot.isBusy = true
@@ -237,20 +269,18 @@ function startAutoDeposit() {
   }, 500 * 1000)
 }
 
+function startAutoRestock() {
+  setInterval(() => {
+    if (!bot.isBusy && !bot.pvp.target) {
+      console.log('🔄 Auto restock triggered.')
+      takeSupplies().catch(err => console.error('Auto restock failed:', err))
+    } else {
+      console.log('⏭️ Auto restock skipped: bot is busy or fighting.')
+    }
+  }, 60 * 1000) // 每分钟检查一次
+}
+
 // ------------------ 值守相关函数 ------------------
-function startGuarding(pos) {
-  guardPos = pos.clone()
-  bot.chat(`I will guard this area (${pos.x.toFixed(1)}, ${pos.y.toFixed(1)}, ${pos.z.toFixed(1)}).`)
-  moveToGuardPos()
-}
-
-function stopGuarding() {
-  if (guardPos) {
-    guardPos = null
-    bot.chat('Stopped guarding.')
-  }
-}
-
 async function moveToGuardPos() {
   if (!guardPos || isMovingToGuard) return
   isMovingToGuard = true
@@ -259,7 +289,6 @@ async function moveToGuardPos() {
     await bot.pathfinder.goto(goal)
     console.log('✅ Returned to guard position.')
   } catch (err) {
-    // 忽略因目标变化或路径停止导致的正常中断
     if (err.message === 'GoalChanged' || err.message === 'PathStopped') {
       console.log(`⏭️ Move to guard was interrupted (${err.message}).`)
     } else {
@@ -270,8 +299,23 @@ async function moveToGuardPos() {
   }
 }
 
+function startGuarding(pos) {
+  guardPos = pos.clone()
+  saveGuardState()
+  bot.chat(`I will guard this area (${pos.x.toFixed(1)}, ${pos.y.toFixed(1)}, ${pos.z.toFixed(1)}).`)
+  moveToGuardPos()
+}
+
+function stopGuarding() {
+  if (guardPos) {
+    guardPos = null
+    saveGuardState()
+    bot.chat('Stopped guarding.')
+  }
+}
+
 // ------------------ 事件监听 ------------------
-bot.once('spawn', () => {
+bot.once('spawn', async () => {
   console.log('✅ Bot spawned!')
 
   const mcData = mcDataLoader(bot.version)
@@ -297,6 +341,17 @@ bot.once('spawn', () => {
   startAutoDeposit()
   console.log('⏰ Auto deposit every 500s started.')
 
+  startAutoRestock()
+  console.log('🔄 Auto restock every 60s started.')
+
+  // 恢复值守状态
+  const savedGuardPos = await loadGuardState()
+  if (savedGuardPos) {
+    guardPos = savedGuardPos
+    bot.chat(`Restored guard position (${guardPos.x.toFixed(1)}, ${guardPos.y.toFixed(1)}, ${guardPos.z.toFixed(1)})`)
+    moveToGuardPos()
+  }
+
   setTimeout(() => {
     const entities = Object.values(bot.entities)
     console.log(`🌍 Nearby entities (${entities.length}):`)
@@ -311,7 +366,6 @@ bot.on('physicsTick', async () => {
 
   // 值守模式
   if (guardPos) {
-    // 寻找距值守点 16 格内的目标
     const target = bot.nearestEntity(e =>
       isTarget(e) &&
       e.position.distanceTo(guardPos) < 16 &&
@@ -325,7 +379,6 @@ bot.on('physicsTick', async () => {
       return
     }
 
-    // 没有目标且离值守点较远时，返回值守点（但避免与正在进行的移动冲突）
     const distToGuard = bot.entity.position.distanceTo(guardPos)
     if (distToGuard > 4 && !isMovingToGuard && !bot.pvp.target) {
       console.log(`⏪ Returning to guard point (${distToGuard.toFixed(1)} blocks away)`)
@@ -347,7 +400,6 @@ bot.on('physicsTick', async () => {
 
 bot.on('stoppedAttacking', () => {
   console.log('🛑 Stopped attacking')
-  // 如果是值守模式且不在值守点附近，则返回（但要避免并发）
   if (guardPos && !isMovingToGuard && bot.entity.position.distanceTo(guardPos) > 4) {
     moveToGuardPos().catch(err => console.error('Return to guard failed:', err))
   }
