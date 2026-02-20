@@ -190,10 +190,21 @@ async function takeSupplies() {
       }
     }
 
+    // 逐个取出物品，若背包满则停止
     for (const req of toWithdraw) {
-      await container.withdraw(req.type, null, req.count, req.nbt)
-      const itemName = bot.registry.items[req.type]?.name || 'unknown'
-      console.log(`Took ${req.count} x ${itemName}`)
+      try {
+        await container.withdraw(req.type, null, req.count, req.nbt)
+        const itemName = bot.registry.items[req.type]?.name || 'unknown'
+        console.log(`Took ${req.count} x ${itemName}`)
+      } catch (err) {
+        if (err.message && err.message.includes('destination full')) {
+          console.log('⚠️ Inventory full, stopping restock.')
+          bot.chat('My inventory is full, cannot take more items.')
+          break
+        } else {
+          throw err // 其他错误继续抛出
+        }
+      }
     }
 
     container.close()
