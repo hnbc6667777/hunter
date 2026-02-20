@@ -26,7 +26,8 @@ bot.loadPlugin(armorManager)
 
 bot.isBusy = false
 let depositInterval = null
-let guardPos = null // 值守位置
+let guardPos = null
+let isMovingToGuard = false // 防止重复移动
 
 // ------------------ 辅助函数 ------------------
 function findNearestChest(mcData) {
@@ -56,20 +57,17 @@ async function goToChest(chestBlock) {
   await bot.pathfinder.goto(goal)
 }
 
-// 目标判断：排除玩家、盔甲架、水中生物，并可选深度过滤
 function isTarget(entity) {
   if (!entity) return false
   if (entity.type === 'player') return false
   if (entity.name === 'armor_stand') return false
   if (entity.isInWater) return false
-  // 可根据世界调整地表高度，此处设为 >60（地面层）
   if (entity.position.y < 60) return false
 
   const targetTypes = ['hostile', 'passive', 'mob', 'animal']
   return targetTypes.includes(entity.type)
 }
 
-// 武器选择（优先剑，其次斧，最后镐）
 async function selectWeaponForTarget(entity) {
   const sword = bot.inventory.items().find(item => item.name.endsWith('_sword'))
   if (sword) {
@@ -243,7 +241,6 @@ function startAutoDeposit() {
 function startGuarding(pos) {
   guardPos = pos.clone()
   bot.chat(`I will guard this area (${pos.x.toFixed(1)}, ${pos.y.toFixed(1)}, ${pos.z.toFixed(1)}).`)
-  // 立即移动到值守点
   moveToGuardPos()
 }
 
@@ -255,10 +252,22 @@ function stopGuarding() {
 }
 
 async function moveToGuardPos() {
-  if (!guardPos) return
-  const goal = new goals.GoalNear(guardPos.x, guardPos.y, guardPos.z, 2)
-  await bot.pathfinder.goto(goal)
-  console.log('✅ Returned to guard position.')
+  if (!guardPos || isMovingToGuard) return
+  isMovingToGuard = true
+  try {
+    const goal = new goals.GoalNear(guardPos.x, guardPos.y, guardPos.z, 2)
+    await bot.pathfinder.goto(goal)
+    console.log('✅ Returned to guard position.')
+  } catch (err) {
+    // 忽略因目标变化或路径停止导致的正常中断
+    if (err.message === 'GoalChanged' || err.message === 'PathStopped') {
+      console.log(`⏭️ Move to guard was interrupted (${err.message}).`)
+    } else {
+      console.error('Error moving to guard position:', err)
+    }
+  } finally {
+    isMovingToGuard = false
+  }
 }
 
 // ------------------ 事件监听 ------------------
@@ -297,17 +306,16 @@ bot.once('spawn', () => {
   }, 2000)
 })
 
-// 自动攻击/值守逻辑
 bot.on('physicsTick', async () => {
   if (bot.pvp.target || bot.isBusy) return
 
   // 值守模式
   if (guardPos) {
-    // 只在距值守点 16 格内寻找目标
+    // 寻找距值守点 16 格内的目标
     const target = bot.nearestEntity(e =>
       isTarget(e) &&
       e.position.distanceTo(guardPos) < 16 &&
-      e.position.distanceTo(bot.entity.position) < 32 // 同时考虑视野范围
+      e.position.distanceTo(bot.entity.position) < 32
     )
 
     if (target) {
@@ -317,16 +325,16 @@ bot.on('physicsTick', async () => {
       return
     }
 
-    // 没有目标且离值守点较远时，返回值守点
+    // 没有目标且离值守点较远时，返回值守点（但避免与正在进行的移动冲突）
     const distToGuard = bot.entity.position.distanceTo(guardPos)
-    if (distToGuard > 4) {
+    if (distToGuard > 4 && !isMovingToGuard && !bot.pvp.target) {
       console.log(`⏪ Returning to guard point (${distToGuard.toFixed(1)} blocks away)`)
       moveToGuardPos().catch(err => console.error('Move to guard failed:', err))
     }
     return
   }
 
-  // 自由狩猎模式（原有逻辑）
+  // 自由狩猎模式
   const target = bot.nearestEntity(e =>
     isTarget(e) && e.position.distanceTo(bot.entity.position) < 32
   )
@@ -339,8 +347,8 @@ bot.on('physicsTick', async () => {
 
 bot.on('stoppedAttacking', () => {
   console.log('🛑 Stopped attacking')
-  // 如果是值守模式且不在值守点附近，则返回
-  if (guardPos && bot.entity.position.distanceTo(guardPos) > 4) {
+  // 如果是值守模式且不在值守点附近，则返回（但要避免并发）
+  if (guardPos && !isMovingToGuard && bot.entity.position.distanceTo(guardPos) > 4) {
     moveToGuardPos().catch(err => console.error('Return to guard failed:', err))
   }
 })
@@ -371,7 +379,6 @@ bot.on('chat', async (username, message) => {
     }
     startGuarding(player.entity.position)
   } else if (message === 'stop') {
-    // 停止所有活动：攻击、寻路、值守
     bot.pvp.stop()
     bot.pathfinder.setGoal(null)
     stopGuarding()
@@ -393,7 +400,6 @@ bot.on('chat', async (username, message) => {
       bot.chat('No target nearby.')
     }
   } else if (message === 'hunt') {
-    // 切换到自由狩猎模式（清除值守点）
     stopGuarding()
     bot.chat('Hunting mode activated.')
   }
